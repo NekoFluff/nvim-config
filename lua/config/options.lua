@@ -4,6 +4,12 @@
 vim.g.lazyvim_php_lsp = "intelephense"
 
 -- when started in a Godot project, accept "open this file" requests from Godot
+-- (Godot > Editor Settings > Text Editor > External sends them to this address)
 if vim.uv.fs_stat(vim.fn.getcwd() .. "/project.godot") then
-  pcall(vim.fn.serverstart, vim.fn.getcwd() .. "/godothost")
+  if vim.fn.has("win32") == 1 then
+    -- Windows uses named pipes instead of socket files
+    pcall(vim.fn.serverstart, [[\\.\pipe\godot-nvim]])
+  else
+    pcall(vim.fn.serverstart, vim.fn.getcwd() .. "/godothost")
+  end
 end
