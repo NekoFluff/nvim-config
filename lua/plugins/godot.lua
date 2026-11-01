@@ -76,6 +76,18 @@ return {
         end
       end
 
+      -- show Godot's error message when a script error stops the game.
+      -- Godot sends it with the "stopped" event, which nvim-dap doesn't display.
+      dap.listeners.after.event_stopped["godot_error_message"] = function(session, body)
+        if session.config.type ~= "godot" or body.reason ~= "exception" or not body.text then
+          return
+        end
+        vim.notify(body.text, vim.log.levels.ERROR, { title = "Godot error" })
+        pcall(function()
+          require("dap.repl").append("ERROR: " .. body.text .. "\n")
+        end)
+      end
+
       -- GUT tests: <leader>GA / GF / GT, scenes: <leader>Gs / GS (lua/godot_gut.lua)
     end,
   },
