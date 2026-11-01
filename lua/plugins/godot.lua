@@ -66,6 +66,16 @@ return {
           project = "${workspaceFolder}",
         },
       }
+      -- close the debug panels when a session ends. LazyVim only closes them on
+      -- "terminated"/"exited" events, which Godot doesn't always send.
+      dap.listeners.on_session["close_dapui"] = function(_, new_session)
+        if new_session == nil then
+          pcall(function()
+            require("dapui").close({})
+          end)
+        end
+      end
+
       -- GUT tests: <leader>GA / GF / GT, scenes: <leader>Gs / GS (lua/godot_gut.lua)
     end,
   },
