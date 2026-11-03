@@ -1,57 +1,35 @@
 -- Run and debug GUT (Godot Unit Test) tests from Neovim.
 --
 -- Running:   starts Godot on the command line with GUT's runner (gut_cmdln.gd).
--- Debugging: starts the same run connected to the Godot editor's debugger, then
---            attaches nvim-dap to it through Godot's debug adapter (port 6006),
---            so breakpoints set with <leader>db work inside tests.
---
--- One-time setup per Godot project, in the Godot editor:
---   Debug menu > "Keep Debug Server Open"  (lets tests started from Neovim
---   connect to the editor's debugger; Godot remembers this per project)
+-- Debugging: asks the Godot editor (through its debug adapter, port 6006) to
+--            start a small runner scene that runs the chosen tests, so
+--            breakpoints set with <leader>db work inside tests. Needs Godot 4.7+
+--            and the Godot editor open on the project. No editor settings needed.
 
 local M = {}
 
--- Godot executable: `godot` on PATH, otherwise the macOS app
-M.godot = vim.fn.exepath("godot") ~= "" and "godot" or "/Applications/Godot.app/Contents/MacOS/Godot"
+-- Godot executable. Set the GODOT environment variable to override, e.g. on
+-- Windows: setx GODOT "C:\Tools\Godot\Godot_v4.7.2-stable_win64_console.exe"
+-- (the _console.exe shows test output in Neovim's terminal).
+M.godot = (function()
+  if vim.env.GODOT and vim.env.GODOT ~= "" then
+    return vim.env.GODOT
+  end
+  for _, name in ipairs({ "godot", "godot4", "Godot" }) do
+    if vim.fn.executable(name) == 1 then
+      return name
+    end
+  end
+  local mac_app = "/Applications/Godot.app/Contents/MacOS/Godot"
+  if vim.uv.fs_stat(mac_app) then
+    return mac_app
+  end
+  return "godot" -- not found: commands will fail with a clear error
+end)()
+
 M.headless = true -- false = show GUT's window (stays open after the run)
-M.debug_port = 6007 -- Godot: Editor Settings > Network > Debug > Remote Port
 
--- GUT pre-run hook. Holds the tests back until nvim-dap has attached, so a
--- breakpoint on the first line of a test is not missed. Written into the
--- project the first time you debug; safe to commit.
-local HOOK_RES = "res://addons/nvim_gut/wait_for_debugger.gd"
-local HOOK_FILE = "addons/nvim_gut/wait_for_debugger.gd"
-local HOOK_SRC = [[
-# GUT pre-run hook, created by Neovim's GUT debug keymaps (lua/godot_gut.lua).
-# 1. Tells Neovim the test process is up (and whether it reached the editor's
-#    debugger) by writing the file named in NVIM_GUT_READY.
-# 2. Waits until Neovim's debugger has attached (Neovim creates the file named
-#    in NVIM_GUT_MARKER) so breakpoints early in a test are not missed.
-# Does nothing when the tests are not started from Neovim's debugger.
-extends GutHookScript
-
-const TIMEOUT_SEC := 15.0
-
-func run():
-	var ready_path := OS.get_environment("NVIM_GUT_READY")
-	var marker := OS.get_environment("NVIM_GUT_MARKER")
-	if ready_path == "" or marker == "":
-		return
-	var f := FileAccess.open(ready_path, FileAccess.WRITE)
-	if f:
-		f.store_string("ok" if EngineDebugger.is_active() else "no-debugger")
-		f = null
-	if not EngineDebugger.is_active():
-		return
-	var waited := 0.0
-	while not FileAccess.file_exists(marker) and waited < TIMEOUT_SEC:
-		await Engine.get_main_loop().create_timer(0.1).timeout
-		waited += 0.1
-	if waited >= TIMEOUT_SEC:
-		push_warning("nvim_gut: debugger did not attach, running tests anyway")
-]]
-
---- GUT command line shared by run and debug
+--- GUT command line for normal (non-debug) runs
 local function gut_cmd(root, extra)
   local cmd = { M.godot, "--path", root }
   if M.headless then
@@ -68,11 +46,10 @@ local function gut_cmd(root, extra)
 end
 
 --- show a command's output in a terminal split
-local function terminal(cmd, root, env)
+local function terminal(cmd, root)
   if _G.Snacks and Snacks.terminal then
     Snacks.terminal(cmd, {
       cwd = root,
-      env = env,
       auto_close = false,
       start_insert = false,
       auto_insert = false,
@@ -81,7 +58,7 @@ local function terminal(cmd, root, env)
     })
   else
     vim.cmd("botright split | enew")
-    vim.fn.jobstart(cmd, { cwd = root, env = env, term = true })
+    vim.fn.jobstart(cmd, { cwd = root, term = true })
   end
 end
 
@@ -107,38 +84,82 @@ function M.run(root, extra)
   terminal(cmd, root)
 end
 
-local listeners_added = false
-local function add_listeners(dap)
-  if listeners_added then
-    return
-  end
-  listeners_added = true
+-- ── Debugging tests ───────────────────────────────────────────────────────
+-- A tiny scene that runs GUT with the tests Neovim picked. Written into the
+-- project's addons/nvim_gut/ folder (safe to commit). Neovim writes the picked
+-- tests to addons/nvim_gut/.nvim_gut.json before each run (add that file to
+-- .gitignore).
 
-  -- breakpoints are sent before configurationDone: now let the tests start
-  dap.listeners.after.configurationDone["godot_gut"] = function(session)
-    local marker = session.config and session.config.nvim_gut_marker
-    if marker then
-      local f = io.open(marker, "w")
-      if f then
-        f:close()
+local RUNNER_DIR = "addons/nvim_gut"
+local RUNNER_SCENE = "res://" .. RUNNER_DIR .. "/runner.tscn"
+local SELECTION_FILE = RUNNER_DIR .. "/.nvim_gut.json"
+
+local RUNNER_GD = [[
+# Runs GUT with the tests Neovim picked. Created by Neovim (lua/godot_gut.lua).
+# Neovim's GUT debug keys start this scene through the Godot editor's debugger.
+extends Node
+
+const SELECTION := "res://addons/nvim_gut/.nvim_gut.json"
+
+func _ready() -> void:
+	var cfg = load("res://addons/gut/gut_config.gd").new()
+	cfg.load_options("res://.gutconfig.json") # your GUT settings, if any
+	if FileAccess.file_exists(SELECTION):
+		cfg.load_options(SELECTION) # which tests to run, from Neovim
+	var runner = load("res://addons/gut/gui/GutRunner.tscn").instantiate()
+	runner.set_gut_config(cfg)
+	# print results to the output (shown in Neovim's debug console)
+	runner.get_gut().get_logger().disable_printer("console", false)
+	add_child(runner)
+	runner.run_tests()
+]]
+
+local RUNNER_TSCN = [[
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://addons/nvim_gut/runner.gd" id="1"]
+
+[node name="NvimGutRunner" type="Node"]
+script = ExtResource("1")
+]]
+
+--- write a file only when its content changed (so Godot doesn't see edits)
+local function write_if_changed(path, text)
+  local f = io.open(path, "r")
+  if f then
+    local old = f:read("*a")
+    f:close()
+    if old == text then
+      return
+    end
+  end
+  vim.fn.mkdir(vim.fs.dirname(path), "p")
+  f = assert(io.open(path, "w"))
+  f:write(text)
+  f:close()
+end
+
+--- turn GUT command-line options into GUT config settings
+local function selection(root, extra)
+  local cfg = {
+    selected = "",
+    unit_test_name = "",
+    include_subdirs = true,
+    should_exit = M.headless, -- the window version stays open to read results
+  }
+  for _, arg in ipairs(extra or {}) do
+    cfg.selected = arg:match("^%-gselect=(.*)") or cfg.selected
+    cfg.unit_test_name = arg:match("^%-gunit_test_name=(.*)") or cfg.unit_test_name
+  end
+  if not vim.uv.fs_stat(root .. "/.gutconfig.json") then
+    cfg.dirs = {}
+    for _, dir in ipairs({ "test", "tests" }) do
+      if vim.uv.fs_stat(root .. "/" .. dir) then
+        table.insert(cfg.dirs, "res://" .. dir)
       end
     end
   end
-
-  -- the editor can take a moment to register the new process: retry briefly
-  dap.listeners.after.attach["godot_gut"] = function(session, err)
-    local cfg = session.config or {}
-    if not (err and cfg.nvim_gut_marker) then
-      return
-    end
-    local tries = (cfg.nvim_gut_tries or 0) + 1
-    if tries > 3 then
-      return vim.notify("GUT: couldn't attach the debugger to the test run.", vim.log.levels.ERROR)
-    end
-    vim.defer_fn(function()
-      dap.run(vim.tbl_extend("force", cfg, { nvim_gut_tries = tries }))
-    end, 300)
-  end
+  return cfg
 end
 
 --- debug tests with nvim-dap
@@ -147,59 +168,19 @@ function M.debug(root, extra)
   if not ok then
     return vim.notify("GUT: nvim-dap is not installed (enable the dap.core extra)", vim.log.levels.ERROR)
   end
-  add_listeners(dap)
 
-  -- create the pre-run hook in the project if it isn't there yet
-  local hook = root .. "/" .. HOOK_FILE
-  if not vim.uv.fs_stat(hook) then
-    vim.fn.mkdir(vim.fs.dirname(hook), "p")
-    local f = assert(io.open(hook, "w"))
-    f:write(HOOK_SRC)
-    f:close()
-  end
+  write_if_changed(root .. "/" .. RUNNER_DIR .. "/runner.gd", RUNNER_GD)
+  write_if_changed(root .. "/" .. RUNNER_DIR .. "/runner.tscn", RUNNER_TSCN)
+  write_if_changed(root .. "/" .. SELECTION_FILE, vim.json.encode(selection(root, extra)))
 
-  local marker = vim.fn.tempname() .. "_nvim_gut"
-  local ready = marker .. "_ready"
-  local cmd = gut_cmd(root, extra)
-  table.insert(cmd, 4, "--remote-debug")
-  table.insert(cmd, 5, "tcp://127.0.0.1:" .. M.debug_port)
-  table.insert(cmd, "-gpre_run_script=" .. HOOK_RES)
-  terminal(cmd, root, { NVIM_GUT_MARKER = marker, NVIM_GUT_READY = ready })
-
-  -- wait for the hook to report in, then attach
-  local timer = assert(vim.uv.new_timer())
-  local waited = 0
-  timer:start(100, 100, vim.schedule_wrap(function()
-    waited = waited + 100
-    local stat = vim.uv.fs_stat(ready)
-    if not stat and waited < 30000 then
-      return
-    end
-    timer:stop()
-    timer:close()
-    if not stat then
-      return vim.notify("GUT: the test run didn't start (see the terminal output).", vim.log.levels.ERROR)
-    end
-    local f = io.open(ready)
-    local status = f and f:read("*a") or ""
-    if f then
-      f:close()
-    end
-    if status ~= "ok" then
-      return vim.notify(
-        "GUT: tests ran without the debugger.\n"
-          .. "In Godot, enable Debug > Keep Debug Server Open (keep the editor open).",
-        vim.log.levels.ERROR
-      )
-    end
-    dap.run({
-      type = "godot",
-      request = "attach",
-      name = "GUT tests",
-      project = root,
-      nvim_gut_marker = marker,
-    })
-  end))
+  dap.run({
+    type = "godot",
+    request = "launch",
+    name = "GUT tests",
+    project = root,
+    scene = RUNNER_SCENE,
+    playArgs = M.headless and { "--headless" } or nil,
+  })
 end
 
 -- ── Scenes ────────────────────────────────────────────────────────────────
@@ -225,7 +206,7 @@ end
 --- the scene that belongs to the current file: the .tscn itself, or a .tscn
 --- with the same name next to a .gd script (player.gd -> player.tscn)
 function M.scene_for_buffer(root)
-  local file = vim.fn.expand("%:p")
+  local file = vim.fs.normalize(vim.fn.expand("%:p")) -- forward slashes on Windows too
   local scene = file:match("%.tscn$") and file or file:gsub("%.gd$", ".tscn")
   if scene:match("%.tscn$") and vim.uv.fs_stat(scene) then
     return scene:sub(#root + 2)
