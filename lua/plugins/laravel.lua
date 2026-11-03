@@ -8,7 +8,7 @@ return {
     opts = { ensure_installed = { "php", "php_only", "blade", "html" } },
   },
 
-  -- format PHP with Laravel Pint instead of php-cs-fixer
+  -- format Blade templates
   {
     "stevearc/conform.nvim",
     opts = { formatters_by_ft = { blade = { "blade-formatter" } } },
@@ -16,6 +16,12 @@ return {
   {
     "mason-org/mason.nvim",
     opts = { ensure_installed = { "blade-formatter" } },
+  },
+
+  -- disable phpcs
+  {
+    "mfussenegger/nvim-lint",
+    opts = { linters_by_ft = { php = {} } },
   },
 
   -- press gf on <x-component> or @include('view') to jump to that file
