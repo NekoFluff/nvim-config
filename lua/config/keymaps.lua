@@ -73,7 +73,7 @@ vim.api.nvim_create_autocmd("BufEnter", {
     -- label the <Space>G group in the which-key menu
     local ok, wk = pcall(require, "which-key")
     if ok then
-      wk.add({ { "<leader>G", group = "GUT", buffer = ev.buf } })
+      wk.add({ { "<leader>G", group = "GUT", icon = { cat = "filetype", name = "gdscript" }, buffer = ev.buf } })
     end
   end,
 })
