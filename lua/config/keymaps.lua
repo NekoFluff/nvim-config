@@ -68,6 +68,8 @@ vim.api.nvim_create_autocmd("BufEnter", {
       gut.debug_scene(root, true)
     end, "Godot: debug a scene (pick)")
 
+    map("<leader>Gd", "<cmd>GodotRefreshDiagnostics<cr>", "Godot: refresh diagnostics")
+
     -- label the <Space>G group in the which-key menu
     local ok, wk = pcall(require, "which-key")
     if ok then
