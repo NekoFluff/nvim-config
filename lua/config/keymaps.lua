@@ -2,6 +2,11 @@
 -- Default keymaps that are always set: https://github.com/LazyVim/LazyVim/blob/main/lua/lazyvim/config/keymaps.lua
 -- Add any additional keymaps here
 
+vim.keymap.del("n", "<C-l>")
+vim.keymap.set("n", "<C-l>", function()
+  local mc_ns = vim.api.nvim_create_namespace("nvim.multicursor")
+  vim.api.nvim_buf_clear_namespace(0, mc_ns, 0, -1)
+end, { desc = "Clear Multicursors" })
 -- Godot keymaps: only active inside Godot projects (a folder with project.godot)
 -- The GUT run/debug logic lives in lua/godot_gut.lua
 local gut = require("godot_gut")
