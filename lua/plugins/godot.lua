@@ -19,6 +19,54 @@ vim.api.nvim_create_user_command("GodotRefreshDiagnostics", function()
   end
 end, { desc = "Re-check all open GDScript files" })
 
+-- Godot (Windows): :GodotFocus brings this Neovim's terminal window to the
+-- front. Godot's external editor setting runs it after opening a file, so
+-- double-clicking a script in Godot switches straight to Neovim. Finds the
+-- window by the "nvim-godot" title set in lua/config/options.lua.
+if vim.fn.has("win32") == 1 then
+  vim.api.nvim_create_user_command("GodotFocus", function()
+    local ffi = require("ffi")
+    pcall(ffi.cdef, [[
+      typedef int (__stdcall *GODOT_WNDENUMPROC)(void *hwnd, intptr_t lparam);
+      int EnumWindows(GODOT_WNDENUMPROC cb, intptr_t lparam);
+      int GetWindowTextA(void *hwnd, char *text, int max);
+      int IsWindowVisible(void *hwnd);
+      int IsIconic(void *hwnd);
+      int ShowWindow(void *hwnd, int cmd);
+      int SetForegroundWindow(void *hwnd);
+      void keybd_event(uint8_t vk, uint8_t scan, uint32_t flags, uintptr_t extra);
+    ]])
+    local user32 = ffi.load("user32")
+
+    -- find the first visible window whose title contains "nvim-godot"
+    local found = nil
+    local buf = ffi.new("char[512]")
+    local cb = ffi.cast("GODOT_WNDENUMPROC", function(hwnd)
+      if user32.IsWindowVisible(hwnd) ~= 0 then
+        user32.GetWindowTextA(hwnd, buf, 512)
+        if ffi.string(buf):find("nvim-godot", 1, true) then
+          found = hwnd
+          return 0 -- stop searching
+        end
+      end
+      return 1
+    end)
+    user32.EnumWindows(cb, 0)
+    cb:free()
+    if not found then
+      return vim.notify("GodotFocus: no window titled nvim-godot", vim.log.levels.WARN)
+    end
+
+    if user32.IsIconic(found) ~= 0 then
+      user32.ShowWindow(found, 9) -- restore if minimized
+    end
+    -- a quick Alt key tap lets Windows allow the switch to another window
+    user32.keybd_event(0x12, 0, 0, 0)
+    user32.keybd_event(0x12, 0, 2, 0)
+    user32.SetForegroundWindow(found)
+  end, { desc = "Bring this Neovim window to the front (Windows)" })
+end
+
 return {
   -- syntax highlighting for scripts, scenes/resources and shaders
   {

@@ -9,7 +9,7 @@ if vim.uv.fs_stat(vim.fn.getcwd() .. "/project.godot") then
   if vim.fn.has("win32") == 1 then
     -- Windows uses named pipes instead of socket files
     pcall(vim.fn.serverstart, [[\\.\pipe\godot-nvim]])
-    -- window title that scripts/godot-nvim.ps1 looks for to bring Neovim forward
+    -- window title that :GodotFocus (lua/plugins/godot.lua) looks for to bring Neovim forward
     vim.opt.title = true
     vim.opt.titlestring = "nvim-godot - %t"
   else
