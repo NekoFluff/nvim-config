@@ -25,7 +25,15 @@ end, { desc = "Re-check all open GDScript files" })
 -- Godot switches straight to Neovim. Finds the window by the "nvim-godot" title
 -- set in lua/config/options.lua.
 if vim.fn.has("win32") == 1 then
-  local MINIMIZE_OTHERS = true -- false: only bring Neovim forward
+  -- minimize other windows too? Toggle with :GodotToggleMinimize (<leader>Gm)
+  if vim.g.godot_minimize_others == nil then
+    vim.g.godot_minimize_others = true -- default: on (false: only bring Neovim forward)
+  end
+
+  vim.api.nvim_create_user_command("GodotToggleMinimize", function()
+    vim.g.godot_minimize_others = not vim.g.godot_minimize_others
+    vim.notify("Godot: minimize other windows " .. (vim.g.godot_minimize_others and "on" or "off"))
+  end, { desc = "Toggle minimizing other windows when Godot opens a file" })
 
   vim.api.nvim_create_user_command("GodotFocus", function()
     local ffi = require("ffi")
@@ -89,7 +97,7 @@ if vim.fn.has("win32") == 1 then
     user32.keybd_event(0x12, 0, 2, 0)
     user32.SetForegroundWindow(found)
 
-    if not MINIMIZE_OTHERS then
+    if not vim.g.godot_minimize_others then
       return
     end
 

@@ -75,6 +75,10 @@ vim.api.nvim_create_autocmd("BufEnter", {
 
     map("<leader>Gd", "<cmd>GodotRefreshDiagnostics<cr>", "Godot: refresh diagnostics")
 
+    if vim.fn.has("win32") == 1 then
+      map("<leader>Gm", "<cmd>GodotToggleMinimize<cr>", "Godot: toggle minimizing other windows")
+    end
+
     -- label the <Space>G group in the which-key menu
     local ok, wk = pcall(require, "which-key")
     if ok then
