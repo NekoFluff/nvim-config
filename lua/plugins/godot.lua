@@ -20,39 +20,63 @@ vim.api.nvim_create_user_command("GodotRefreshDiagnostics", function()
 end, { desc = "Re-check all open GDScript files" })
 
 -- Godot (Windows): :GodotFocus brings this Neovim's terminal window to the
--- front. Godot's external editor setting runs it after opening a file, so
--- double-clicking a script in Godot switches straight to Neovim. Finds the
--- window by the "nvim-godot" title set in lua/config/options.lua.
+-- front and minimizes every other window on the same monitor. Godot's external
+-- editor setting runs it after opening a file, so double-clicking a script in
+-- Godot switches straight to Neovim. Finds the window by the "nvim-godot" title
+-- set in lua/config/options.lua.
 if vim.fn.has("win32") == 1 then
+  local MINIMIZE_OTHERS = true -- false: only bring Neovim forward
+
   vim.api.nvim_create_user_command("GodotFocus", function()
     local ffi = require("ffi")
-    pcall(ffi.cdef, [[
-      typedef int (__stdcall *GODOT_WNDENUMPROC)(void *hwnd, intptr_t lparam);
-      int EnumWindows(GODOT_WNDENUMPROC cb, intptr_t lparam);
-      int GetWindowTextA(void *hwnd, char *text, int max);
-      int IsWindowVisible(void *hwnd);
-      int IsIconic(void *hwnd);
-      int ShowWindow(void *hwnd, int cmd);
-      int SetForegroundWindow(void *hwnd);
-      void keybd_event(uint8_t vk, uint8_t scan, uint32_t flags, uintptr_t extra);
-    ]])
+    local bit = require("bit")
+    -- declare each Windows function separately, so re-running is harmless
+    for _, decl in ipairs({
+      "typedef int (__stdcall *GODOT_WNDENUMPROC)(void *hwnd, intptr_t lparam);",
+      "int EnumWindows(GODOT_WNDENUMPROC cb, intptr_t lparam);",
+      "int GetWindowTextA(void *hwnd, char *text, int max);",
+      "int GetClassNameA(void *hwnd, char *name, int max);",
+      "int IsWindowVisible(void *hwnd);",
+      "int IsIconic(void *hwnd);",
+      "int ShowWindow(void *hwnd, int cmd);",
+      "int ShowWindowAsync(void *hwnd, int cmd);",
+      "int SetForegroundWindow(void *hwnd);",
+      "void *GetWindow(void *hwnd, unsigned int cmd);",
+      "intptr_t GetWindowLongPtrA(void *hwnd, int index);",
+      "void *MonitorFromWindow(void *hwnd, uint32_t flags);",
+      "void keybd_event(uint8_t vk, uint8_t scan, uint32_t flags, uintptr_t extra);",
+      "long DwmGetWindowAttribute(void *hwnd, uint32_t attr, void *value, uint32_t size);",
+    }) do
+      pcall(ffi.cdef, decl)
+    end
     local user32 = ffi.load("user32")
-
-    -- find the first visible window whose title contains "nvim-godot"
-    local found = nil
+    local dwmapi = ffi.load("dwmapi")
     local buf = ffi.new("char[512]")
+
+    local function title(hwnd)
+      user32.GetWindowTextA(hwnd, buf, 512)
+      return ffi.string(buf)
+    end
+
+    -- every visible top-level window
+    local windows = {}
     local cb = ffi.cast("GODOT_WNDENUMPROC", function(hwnd)
       if user32.IsWindowVisible(hwnd) ~= 0 then
-        user32.GetWindowTextA(hwnd, buf, 512)
-        if ffi.string(buf):find("nvim-godot", 1, true) then
-          found = hwnd
-          return 0 -- stop searching
-        end
+        table.insert(windows, hwnd)
       end
       return 1
     end)
     user32.EnumWindows(cb, 0)
     cb:free()
+
+    -- this Neovim's window: the first one with "nvim-godot" in its title
+    local found = nil
+    for _, hwnd in ipairs(windows) do
+      if title(hwnd):find("nvim-godot", 1, true) then
+        found = hwnd
+        break
+      end
+    end
     if not found then
       return vim.notify("GodotFocus: no window titled nvim-godot", vim.log.levels.WARN)
     end
@@ -64,6 +88,44 @@ if vim.fn.has("win32") == 1 then
     user32.keybd_event(0x12, 0, 0, 0)
     user32.keybd_event(0x12, 0, 2, 0)
     user32.SetForegroundWindow(found)
+
+    if not MINIMIZE_OTHERS then
+      return
+    end
+
+    -- is this a normal app window (not the taskbar, desktop, a tooltip, ...)?
+    local skip_class = { Shell_TrayWnd = true, Shell_SecondaryTrayWnd = true, Progman = true, WorkerW = true }
+    local cloaked = ffi.new("int[1]")
+    local function is_app_window(hwnd)
+      if user32.IsIconic(hwnd) ~= 0 or title(hwnd) == "" then
+        return false
+      end
+      if user32.GetWindow(hwnd, 4) ~= nil then -- has an owner: a dialog or popup
+        return false
+      end
+      local style = tonumber(user32.GetWindowLongPtrA(hwnd, -16))
+      local exstyle = tonumber(user32.GetWindowLongPtrA(hwnd, -20))
+      if bit.band(style, 0x20000) == 0 or bit.band(exstyle, 0x80) ~= 0 then
+        return false -- can't be minimized, or a tool window
+      end
+      user32.GetClassNameA(hwnd, buf, 512)
+      if skip_class[ffi.string(buf)] then
+        return false
+      end
+      -- hidden "cloaked" windows (e.g. suspended Store apps)
+      if dwmapi.DwmGetWindowAttribute(hwnd, 14, cloaked, 4) == 0 and cloaked[0] ~= 0 then
+        return false
+      end
+      return true
+    end
+
+    -- minimize every other app window on the same monitor, without activating it
+    local monitor = user32.MonitorFromWindow(found, 2)
+    for _, hwnd in ipairs(windows) do
+      if hwnd ~= found and user32.MonitorFromWindow(hwnd, 2) == monitor and is_app_window(hwnd) then
+        user32.ShowWindowAsync(hwnd, 7) -- SW_SHOWMINNOACTIVE
+      end
+    end
   end, { desc = "Bring this Neovim window to the front (Windows)" })
 end
 
